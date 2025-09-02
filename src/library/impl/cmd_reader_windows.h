@@ -7,6 +7,7 @@ namespace xlang::impl
     {
         HKEY handle{};
 
+        explicit registry_key(HKEY h = nullptr) noexcept : handle(h) {}
         registry_key(registry_key const&) = delete;
         registry_key& operator=(registry_key const&) = delete;
 
@@ -123,7 +124,7 @@ namespace xlang::impl
             throw_invalid("Could not find the Windows SDK in the registry");
         }
 
-        return { key };
+        return registry_key{ key };
     }
 
     inline std::filesystem::path get_sdk_path()

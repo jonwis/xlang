@@ -1,7 +1,7 @@
 #include "pch.h"
 
 using namespace std::chrono;
-using namespace std::experimental::filesystem;
+using namespace std::filesystem;
 using namespace std::string_view_literals;
 using namespace xlang;
 using namespace xlang::meta::reader;
@@ -710,7 +710,7 @@ void write_required_interface(writer& w, InterfaceImpl const& interface_impl)
     w.write("\n%", interface_impl.Interface());
 }
 
-void write_required(writer& w, std::string_view const& requires, TypeDef const& type)
+void write_required(writer& w, std::string_view const& requiresInterfaces, TypeDef const& type)
 {
     auto interfaces{ type.InterfaceImpl() };
 
@@ -720,7 +720,7 @@ void write_required(writer& w, std::string_view const& requires, TypeDef const& 
     }
 
     w.write(" %%",
-        requires,
+        requiresInterfaces,
         bind_list<write_required_interface>(",", interfaces));
 }
 
