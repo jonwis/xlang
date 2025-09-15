@@ -8,8 +8,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(meta_reader "")
-target_sources(meta_reader PUBLIC main.cpp pch.cpp)
+target_sources(meta_reader PUBLIC
+    main.cpp
+    pch.cpp)
 target_include_directories(meta_reader PUBLIC ${XLANG_LIBRARY_PATH})
+target_link_options(meta_reader PRIVATE /natvis:${CMAKE_CURRENT_SOURCE_DIR}/../../src/library/xlang.meta.natvis)
 
 function(ADD_OBJECT_DEPENDS file dependency)
     get_source_file_property(cur_obj_depends ${file} OBJECT_DEPENDS)

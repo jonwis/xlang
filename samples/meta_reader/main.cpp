@@ -11,6 +11,11 @@ using namespace xlang::cmd;
 template <typename...T> struct overloaded : T... { using T::operator()...; };
 template <typename...T> overloaded(T...)->overloaded<T...>;
 
+bool is_exclusive_to(auto type)
+{
+    return get_category(type) == category::interface_type && get_attribute(type, "Windows.Foundation.Metadata", "ExclusiveToAttribute");
+}
+
 struct writer : indented_writer_base<writer>
 {
     using indented_writer_base<writer>::write;
@@ -424,6 +429,17 @@ struct writer : indented_writer_base<writer>
             std::get<uint8_t>(std::get<ElemSig>(args[10].value).value));
     }
 
+    std::tuple<std::string_view, uint16_t, uint16_t> get_contract_version(CustomAttributeSig const& arg)
+    {
+        // ContractVersionAttribute has two parameters:
+        // 1. A SystemType for the contract (System.Type in metadata)
+        // 2. A uint32 representing the version (major in high 16 bits, minor in low 16 bits)
+        auto const& args = arg.FixedArgs();
+        auto nameValue = std::get<ElemSig::SystemType>(std::get<ElemSig>(args[0].value).value).name;
+        auto nameVersion = std::get<uint32_t>(std::get<ElemSig>(args[1].value).value);
+        return { nameValue, static_cast<uint16_t>(nameVersion >> 16), static_cast<uint16_t>(nameVersion & 0xFFFF) };
+    }
+
     void write(CustomAttribute const& attr)
     {
         auto const& name = attr.TypeNamespaceAndName();
@@ -432,6 +448,12 @@ struct writer : indented_writer_base<writer>
         if (name.first == "Windows.Foundation.Metadata"sv && name.second == "GuidAttribute"sv)
         {
             write_uuid(sig);
+            return;
+        }
+        else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "ContractVersionAttribute"sv)
+        {
+            auto [contract_name, major, minor] = get_contract_version(sig);
+            write("[contract(%, %.%)]", contract_name, major, minor);
             return;
         }
 
@@ -702,6 +724,10 @@ void write_method_semantic(writer& w, MethodSemantics const& method_semantic, Me
     }
 }
 
+bool is_iface_exclusiveto(auto const& iface)
+{
+    return (iface.type() == TypeDefOrRef::TypeRef) && is_exclusive_to(find_required(iface.TypeRef()));
+}
 
 void write_required_interface(writer& w, InterfaceImpl const& interface_impl)
 {
@@ -710,11 +736,23 @@ void write_required_interface(writer& w, InterfaceImpl const& interface_impl)
     w.write("\n%", interface_impl.Interface());
 }
 
+auto filter_range(auto const& range, auto const& predicate)
+{
+    std::vector<std::decay_t<decltype(*begin(range))>> result;
+    std::copy_if(begin(range), end(range), std::back_inserter(result), predicate);
+    return result;
+}
+
 void write_required(writer& w, std::string_view const& requiresInterfaces, TypeDef const& type)
 {
     auto interfaces{ type.InterfaceImpl() };
 
-    if (begin(interfaces) == end(interfaces))
+    auto filtered = filter_range(interfaces, [](auto const& iface)
+    {
+        return !is_iface_exclusiveto(iface.Interface());
+    });
+
+    if (begin(filtered) == end(filtered))
     {
         return;
     }
@@ -772,6 +810,11 @@ void write_interface_methods(writer& w, TypeDef const& type)
 
 void write_interface(writer& w, TypeDef const& type)
 {
+    if (is_exclusive_to(type))
+    {
+        return;
+    }
+
     auto guard = w.push_generic_params(type.GenericParam());
     writer::indent_guard _{ w };
 
@@ -782,10 +825,34 @@ void write_interface(writer& w, TypeDef const& type)
         bind<write_interface_methods>(type));
 }
 
+bool is_attribute(auto const& type, std::string_view ns, std::string_view name)
+{
+    return type.TypeNamespace() == ns && type.TypeName() == name;
+}
 void write_class(writer& w, TypeDef const& type)
 {
     auto guard = w.push_generic_params(type.GenericParam());
     writer::indent_guard _{ w };
+
+    // Skip some defaults - ThreadingAttribute(Both), MarshalingBehaviorAttribute(Agile)
+    auto attributes = filter_range(type.CustomAttribute(), [](auto const& attr)
+    {
+        if (is_attribute(attr.TypeNamespaceAndName(), "Windows.Foundation.Metadata"sv, "ThreadingAttribute"sv))
+        {
+            auto const& sig = attr.Value();
+            auto const& arg = sig.FixedArgs().front();
+            auto enum_value = std::get<ElemSig::EnumValue>(arg.value);
+            return !(enum_value.type.m_typedef.TypeNamespace() == "Windows.Foundation.Metadata"sv &&
+                enum_value.type.m_typedef.TypeName() == "ThreadingModel"sv &&
+                (std::get<int32_t>(enum_value.value) == 1));
+        }
+        else if (is_attribute(attr.TypeDef(), "Windows.Foundation.Metadata"sv, "MarshalingBehaviorAttribute"sv))
+        {
+            return false;
+        }
+
+        return true;
+    });
 
     w.write("%\nruntimeclass %%\n{\n};\n",
         bind_each<write_custom_attribute>(type.CustomAttribute()),
