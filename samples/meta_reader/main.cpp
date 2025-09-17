@@ -495,9 +495,9 @@ struct writer : indented_writer_base<writer>
         {
             return write("[webhosthidden]");
         }
-        else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "ExclusiveToAttribute")
+        else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "OverloadAttribute")
         {
-            return; // Handled elsewhere
+            return write("[method_name(\"%\")]", std::get<std::string_view>(std::get<ElemSig>(sig.FixedArgs()[0].value).value));
         }
         else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "ThreadingAttribute")
         {
