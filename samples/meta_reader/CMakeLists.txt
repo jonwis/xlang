@@ -52,7 +52,7 @@ endif()
 
 if (MSVC)
     TARGET_CONFIG_MSVC_PCH(meta_reader pch.cpp pch.h)
-    target_link_libraries(meta_reader)
+    target_link_libraries(meta_reader onecoreuap)
 else()
     target_link_libraries(meta_reader c++ c++abi c++experimental)
     target_link_libraries(meta_reader -lpthread)

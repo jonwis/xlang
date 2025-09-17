@@ -16,6 +16,32 @@ bool is_exclusive_to(auto type)
     return get_category(type) == category::interface_type && get_attribute(type, "Windows.Foundation.Metadata", "ExclusiveToAttribute");
 }
 
+auto split_type_name(std::string_view name)
+{
+    auto pos = name.rfind('.');
+    if (pos == std::string_view::npos)
+    {
+        return std::make_pair(""sv, name);
+    }
+    return std::make_pair(name.substr(0, pos), name.substr(pos + 1));
+}
+
+auto split_enum_name(std::string_view name)
+{
+    // From "Foo.Bar.Bas.Thing" return {"Foo.Bar", "Bas", "Thing"}
+    auto pos = name.rfind('.');
+    if (pos == std::string_view::npos)
+    {
+        return std::make_tuple(""sv, ""sv, name);
+    }
+    auto second_last = name.rfind('.', pos - 1);
+    if (second_last == std::string_view::npos)
+    {
+        return std::make_tuple(""sv, name.substr(0, pos), name.substr(pos + 1));
+    }
+    return std::make_tuple(name.substr(0, second_last), name.substr(second_last + 1, pos - second_last - 1), name.substr(pos + 1));
+}
+
 struct writer : indented_writer_base<writer>
 {
     using indented_writer_base<writer>::write;
@@ -415,7 +441,7 @@ struct writer : indented_writer_base<writer>
     {
         auto const& args = arg.FixedArgs();
 
-        write_printf("[Windows.Foundation.Metadata.GuidAttribute(%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X)]",
+        write_printf("[uuid(\"%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X\")]",
             std::get<uint32_t>(std::get<ElemSig>(args[0].value).value),
             std::get<uint16_t>(std::get<ElemSig>(args[1].value).value),
             std::get<uint16_t>(std::get<ElemSig>(args[2].value).value),
@@ -429,15 +455,23 @@ struct writer : indented_writer_base<writer>
             std::get<uint8_t>(std::get<ElemSig>(args[10].value).value));
     }
 
-    std::tuple<std::string_view, uint16_t, uint16_t> get_contract_version(CustomAttributeSig const& arg)
+    void write_contract(CustomAttributeSig const& arg)
     {
-        // ContractVersionAttribute has two parameters:
-        // 1. A SystemType for the contract (System.Type in metadata)
-        // 2. A uint32 representing the version (major in high 16 bits, minor in low 16 bits)
         auto const& args = arg.FixedArgs();
-        auto nameValue = std::get<ElemSig::SystemType>(std::get<ElemSig>(args[0].value).value).name;
-        auto nameVersion = std::get<uint32_t>(std::get<ElemSig>(args[1].value).value);
-        return { nameValue, static_cast<uint16_t>(nameVersion >> 16), static_cast<uint16_t>(nameVersion & 0xFFFF) };
+        auto contract_name = std::get<ElemSig::SystemType>(std::get<ElemSig>(args[0].value).value).name;
+        auto composed_version = std::get<uint32_t>(std::get<ElemSig>(args[1].value).value);
+        auto major = static_cast<uint16_t>(composed_version >> 16);
+        auto minor = static_cast<uint16_t>(composed_version & 0xFFFF);
+
+        if (minor == 0)
+        {
+            write("[contract(%, %)]", contract_name, major);
+        }
+        else
+        {
+            write("[contract(%, %.%)]", contract_name, major, minor);
+        }
+        return;
     }
 
     void write(CustomAttribute const& attr)
@@ -452,8 +486,7 @@ struct writer : indented_writer_base<writer>
         }
         else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "ContractVersionAttribute"sv)
         {
-            auto [contract_name, major, minor] = get_contract_version(sig);
-            write("[contract(%, %.%)]", contract_name, major, minor);
+            write_contract(sig);
             return;
         }
 
@@ -825,10 +858,32 @@ void write_interface(writer& w, TypeDef const& type)
         bind<write_interface_methods>(type));
 }
 
-bool is_attribute(auto const& type, std::string_view ns, std::string_view name)
+bool has_attr_enum_valued(CustomAttribute const& attr, std::string_view attrNsName, std::string_view enumFullName)
 {
-    return type.TypeNamespace() == ns && type.TypeName() == name;
+    auto [attrNs, attrName] = split_type_name(attrNsName);
+    auto [enumNs, enumName, enumValueName] = split_enum_name(enumFullName);
+    auto const& name = attr.TypeNamespaceAndName();
+    if (name.first == attrNs && name.second == attrName)
+    {
+        auto const& sig = attr.Value();
+        if (sig.FixedArgs().size() == 1)
+        {
+            auto const& arg = sig.FixedArgs().front();
+            if (auto const* elemSig = std::get_if<ElemSig>(&arg.value))
+            {
+                if (auto const* enumValue = std::get_if<ElemSig::EnumValue>(&elemSig->value))
+                {
+                    if (enumValue->type.m_typedef.TypeNamespace() == enumNs && enumValue->type.m_typedef.TypeName() == enumName)
+                    {
+                        return enumValue->equals_enumerator(enumValueName);
+                    }
+                }
+            }
+        }
+    }
+    return false;
 }
+
 void write_class(writer& w, TypeDef const& type)
 {
     auto guard = w.push_generic_params(type.GenericParam());
@@ -837,25 +892,19 @@ void write_class(writer& w, TypeDef const& type)
     // Skip some defaults - ThreadingAttribute(Both), MarshalingBehaviorAttribute(Agile)
     auto attributes = filter_range(type.CustomAttribute(), [](auto const& attr)
     {
-        if (is_attribute(attr.TypeNamespaceAndName(), "Windows.Foundation.Metadata"sv, "ThreadingAttribute"sv))
-        {
-            auto const& sig = attr.Value();
-            auto const& arg = sig.FixedArgs().front();
-            auto enum_value = std::get<ElemSig::EnumValue>(arg.value);
-            return !(enum_value.type.m_typedef.TypeNamespace() == "Windows.Foundation.Metadata"sv &&
-                enum_value.type.m_typedef.TypeName() == "ThreadingModel"sv &&
-                (std::get<int32_t>(enum_value.value) == 1));
-        }
-        else if (is_attribute(attr.TypeDef(), "Windows.Foundation.Metadata"sv, "MarshalingBehaviorAttribute"sv))
+        if (has_attr_enum_valued(attr, "Windows.Foundation.Metadata.ThreadingAttribute"sv, "Windows.Foundation.Metadata.ThreadingModel.Both"sv))
         {
             return false;
         }
-
+        else if (has_attr_enum_valued(attr, "Windows.Foundation.Metadata.MarshalingBehaviorAttribute"sv, "Windows.Foundation.Metadata.MarshalingType.Agile"sv))
+        {
+            return false;
+        }
         return true;
     });
 
     w.write("%\nruntimeclass %%\n{\n};\n",
-        bind_each<write_custom_attribute>(type.CustomAttribute()),
+        bind_each<write_custom_attribute>(attributes),
         bind<write_type_name>(type.TypeName()),
         bind<write_required>(":", type));
 }
