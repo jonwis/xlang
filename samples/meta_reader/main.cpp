@@ -547,6 +547,25 @@ struct writer : indented_writer_base<writer>
         {
             return write("[method_name(\"%\")]", std::get<std::string_view>(std::get<ElemSig>(sig.FixedArgs()[0].value).value));
         }
+        else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "RemoteAsyncAttribute")
+        {
+            return write("[remote_async]");
+        }
+        else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "DeprecatedAttribute")
+        {
+            auto const& args = sig.FixedArgs();
+            auto message = std::get<std::string_view>(std::get<ElemSig>(args[0].value).value);
+            if (args.size() == 1)
+            {
+                write("[deprecated(\"%\")]", message);
+            }
+            else
+            {
+                auto const version = std::get<uint32_t>(std::get<ElemSig>(args[1].value).value);
+                write("[deprecated(\"%\", %)]", message, version);
+            }
+            return;
+        }
         else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "ThreadingAttribute")
         {
             std::array models = {
@@ -871,18 +890,11 @@ void write_required(writer& w, std::string_view const& requiresTag, TypeDef cons
         bind_list<write_required_interface>(",", interfaces));
 }
 
-void write_interface_methods(writer& w, TypeDef const& type)
-{
-    auto const& methods = type.MethodList();
-    auto const& properties = type.PropertyList();
-    auto const& events = type.EventList();
-    writer::indent_guard _{ w };
-
-    auto method_semantic = [&properties, &events](MethodDef const& method) -> MethodSemantics
+MethodSemantics find_method_semantics(TypeDef const& type, MethodDef const& method)
     {
-        for (auto const& prop : properties)
+    for (auto const& property : type.PropertyList())
         {
-            for (auto const& semantic : prop.MethodSemantic())
+        for (auto const& semantic : property.MethodSemantic())
             {
                 if (semantic.Method() == method)
                 {
@@ -890,7 +902,7 @@ void write_interface_methods(writer& w, TypeDef const& type)
                 }
             }
         }
-        for (auto const& event : events)
+    for (auto const& event : type.EventList())
         {
             for (auto const& semantic : event.MethodSemantic())
             {
@@ -901,11 +913,18 @@ void write_interface_methods(writer& w, TypeDef const& type)
             }
         }
         return {};
-    };
+}
 
-    for (auto method = begin(methods); method != end(methods); ++method)
+void write_interface_methods(writer& w, TypeDef const& type)
+{
+    auto const& methods = type.MethodList();
+    auto const& properties = type.PropertyList();
+    auto const& events = type.EventList();
+    writer::indent_guard _{ w };
+
+    for (auto method : methods)
     {
-        auto const& semantic = method_semantic(method);
+        auto const& semantic = find_method_semantics(type, method);
         if (semantic)
         {
             write_method_semantic(w, semantic, method);
