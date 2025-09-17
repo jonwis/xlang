@@ -26,6 +26,16 @@ auto split_type_name(std::string_view name)
     return std::make_pair(name.substr(0, pos), name.substr(pos + 1));
 }
 
+std::vector<TypeDef> remove_exclusiveto(auto const& range)
+{
+    std::vector<TypeDef> result;
+    std::copy_if(begin(range), end(range), std::back_inserter(result), [](auto const& type)
+    {
+        return !is_exclusive_to(type);
+    });
+    return result;
+}
+
 auto split_enum_name(std::string_view name)
 {
     // From "Foo.Bar.Bas.Thing" return {"Foo.Bar", "Bas", "Thing"}
@@ -40,6 +50,44 @@ auto split_enum_name(std::string_view name)
         return std::make_tuple(""sv, name.substr(0, pos), name.substr(pos + 1));
     }
     return std::make_tuple(name.substr(0, second_last), name.substr(second_last + 1, pos - second_last - 1), name.substr(pos + 1));
+}
+
+bool is_iface_exclusiveto(auto const& iface)
+{
+    return (iface.type() == TypeDefOrRef::TypeRef) && is_exclusive_to(find_required(iface.TypeRef()));
+}
+
+auto filter_range(auto const& range, auto const& predicate)
+{
+    std::vector<std::decay_t<decltype(*begin(range))>> result;
+    std::copy_if(begin(range), end(range), std::back_inserter(result), predicate);
+    return result;
+}
+
+bool has_attr_enum_valued(CustomAttribute const& attr, std::string_view attrNsName, std::string_view enumFullName)
+{
+    auto [attrNs, attrName] = split_type_name(attrNsName);
+    auto [enumNs, enumName, enumValueName] = split_enum_name(enumFullName);
+    auto const& name = attr.TypeNamespaceAndName();
+    if (name.first == attrNs && name.second == attrName)
+    {
+        auto const& sig = attr.Value();
+        if (sig.FixedArgs().size() == 1)
+        {
+            auto const& arg = sig.FixedArgs().front();
+            if (auto const* elemSig = std::get_if<ElemSig>(&arg.value))
+            {
+                if (auto const* enumValue = std::get_if<ElemSig::EnumValue>(&elemSig->value))
+                {
+                    if (enumValue->type.m_typedef.TypeNamespace() == enumNs && enumValue->type.m_typedef.TypeName() == enumName)
+                    {
+                        return enumValue->equals_enumerator(enumValueName);
+                    }
+                }
+            }
+        }
+    }
+    return false;
 }
 
 struct writer : indented_writer_base<writer>
@@ -801,10 +849,6 @@ void write_method_semantic(writer& w, MethodSemantics const& method_semantic, Me
     }
 }
 
-bool is_iface_exclusiveto(auto const& iface)
-{
-    return (iface.type() == TypeDefOrRef::TypeRef) && is_exclusive_to(find_required(iface.TypeRef()));
-}
 
 void write_required_interface(writer& w, InterfaceImpl const& interface_impl)
 {
@@ -813,29 +857,17 @@ void write_required_interface(writer& w, InterfaceImpl const& interface_impl)
     w.write("\n%", interface_impl.Interface());
 }
 
-auto filter_range(auto const& range, auto const& predicate)
-{
-    std::vector<std::decay_t<decltype(*begin(range))>> result;
-    std::copy_if(begin(range), end(range), std::back_inserter(result), predicate);
-    return result;
-}
-
-void write_required(writer& w, std::string_view const& requiresInterfaces, TypeDef const& type)
+void write_required(writer& w, std::string_view const& requiresTag, TypeDef const& type)
 {
     auto interfaces{ type.InterfaceImpl() };
 
-    auto filtered = filter_range(interfaces, [](auto const& iface)
-    {
-        return !is_iface_exclusiveto(iface.Interface());
-    });
-
-    if (begin(filtered) == end(filtered))
+    if (begin(interfaces) == end(interfaces))
     {
         return;
     }
 
     w.write(" %%",
-        requiresInterfaces,
+        requiresTag,
         bind_list<write_required_interface>(",", interfaces));
 }
 
@@ -887,11 +919,6 @@ void write_interface_methods(writer& w, TypeDef const& type)
 
 void write_interface(writer& w, TypeDef const& type)
 {
-    if (is_exclusive_to(type))
-    {
-        return;
-    }
-
     auto guard = w.push_generic_params(type.GenericParam());
     writer::indent_guard _{ w };
 
@@ -900,32 +927,6 @@ void write_interface(writer& w, TypeDef const& type)
         bind<write_type_name>(type.TypeName()),
         bind<write_required>("requires", type),
         bind<write_interface_methods>(type));
-}
-
-bool has_attr_enum_valued(CustomAttribute const& attr, std::string_view attrNsName, std::string_view enumFullName)
-{
-    auto [attrNs, attrName] = split_type_name(attrNsName);
-    auto [enumNs, enumName, enumValueName] = split_enum_name(enumFullName);
-    auto const& name = attr.TypeNamespaceAndName();
-    if (name.first == attrNs && name.second == attrName)
-    {
-        auto const& sig = attr.Value();
-        if (sig.FixedArgs().size() == 1)
-        {
-            auto const& arg = sig.FixedArgs().front();
-            if (auto const* elemSig = std::get_if<ElemSig>(&arg.value))
-            {
-                if (auto const* enumValue = std::get_if<ElemSig::EnumValue>(&elemSig->value))
-                {
-                    if (enumValue->type.m_typedef.TypeNamespace() == enumNs && enumValue->type.m_typedef.TypeName() == enumName)
-                    {
-                        return enumValue->equals_enumerator(enumValueName);
-                    }
-                }
-            }
-        }
-    }
-    return false;
 }
 
 void write_class(writer& w, TypeDef const& type)
@@ -951,6 +952,41 @@ void write_class(writer& w, TypeDef const& type)
         {
             return false;
         }
+        return true;
+    });
+
+    // When a type implements either IAsyncOperation* or IAsyncAction*, it also implicitly implements IAsyncInfo.
+    // We don't want to list IAsyncInfo in the "requires" clause, so filter it out.
+    bool is_async_derived = std::find_if(begin(type.InterfaceImpl()), end(type.InterfaceImpl()), [](auto const& iface)
+    {
+        if (iface.Interface().type() == TypeDefOrRef::TypeRef)
+        {
+            auto const& ifaceType = iface.Interface().TypeRef();
+            if (ifaceType.TypeNamespace() == "Windows.Foundation"sv)
+            {
+                if (ifaceType.TypeName().starts_with("IAsyncOperation"sv) || ifaceType.TypeName() == "IAsyncAction"sv)
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }) != end(type.InterfaceImpl());
+
+    auto ifaces = filter_range(type.InterfaceImpl(), [&](auto const& iface)
+    {
+        if (is_iface_exclusiveto(iface.Interface()))
+        {
+            return false;
+        }
+        else if (iface.Interface().type() == TypeDefOrRef::TypeRef)
+        {
+            if (is_async_derived && iface.Interface().TypeRef().TypeNamespace() == "Windows.Foundation"sv && iface.Interface().TypeRef().TypeName() == "IAsyncInfo"sv)
+            {
+                return false;
+            }
+        }
+
         return true;
     });
 
@@ -1035,7 +1071,7 @@ int main(int const argc, char** argv)
                     f.bind_each<write_enum>(members.enums),
                     f.bind_each<write_struct>(members.structs),
                     f.bind_each<write_delegate>(members.delegates),
-                    f.bind_each<write_interface>(members.interfaces),
+                    f.bind_each<write_interface>(remove_exclusiveto(members.interfaces)),
                     f.bind_each<write_class>(members.classes));
 
                 auto filename{ out };
