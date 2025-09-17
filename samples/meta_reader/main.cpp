@@ -891,28 +891,28 @@ void write_required(writer& w, std::string_view const& requiresTag, TypeDef cons
 }
 
 MethodSemantics find_method_semantics(TypeDef const& type, MethodDef const& method)
-    {
+{
     for (auto const& property : type.PropertyList())
-        {
+    {
         for (auto const& semantic : property.MethodSemantic())
-            {
-                if (semantic.Method() == method)
-                {
-                    return semantic;
-                }
-            }
-        }
-    for (auto const& event : type.EventList())
         {
-            for (auto const& semantic : event.MethodSemantic())
+            if (semantic.Method() == method)
             {
-                if (semantic.Method() == method)
-                {
-                    return semantic;
-                }
+                return semantic;
             }
         }
-        return {};
+    }
+    for (auto const& event : type.EventList())
+    {
+        for (auto const& semantic : event.MethodSemantic())
+        {
+            if (semantic.Method() == method)
+            {
+                return semantic;
+            }
+        }
+    }
+    return {};
 }
 
 void write_interface_methods(writer& w, TypeDef const& type)
@@ -946,6 +946,45 @@ void write_interface(writer& w, TypeDef const& type)
         bind<write_type_name>(type.TypeName()),
         bind<write_required>("requires", type),
         bind<write_interface_methods>(type));
+}
+
+void write_class_members(writer& w, TypeDef const& type)
+{
+    auto const& methods = type.MethodList();
+    writer::indent_guard _{ w };
+
+    for (auto iface : type.InterfaceImpl())
+    {
+        // If the interface is exclusiveto, write the members of it in an [interface_name(ifacename, uuid)] block.
+        if (!is_iface_exclusiveto(iface.Interface()))
+        {
+            continue;
+        }
+
+        auto ifaceDef = find_required(iface.Interface());
+
+        w.write("\nHALLO\n");
+        w.write("%\n[interface_name(%.%, %)]\n",
+            bind_each<write_custom_attribute>(ifaceDef.CustomAttribute()),
+            ifaceDef.TypeNamespace(),
+            ifaceDef.TypeName(),
+        ifaceDef);
+
+        w.write("%.%\n", ifaceDef.TypeNamespace(), ifaceDef.TypeName());
+    }
+
+    for (auto method : methods)
+    {
+        auto const& semantic = find_method_semantics(type, method);
+        if (semantic)
+        {
+            write_method_semantic(w, semantic, method);
+        }
+        else
+        {
+            write_method(w, method);
+        }
+    }
 }
 
 void write_class(writer& w, TypeDef const& type)
@@ -1009,10 +1048,11 @@ void write_class(writer& w, TypeDef const& type)
         return true;
     });
 
-    w.write("%\nruntimeclass %%\n{\n};\n",
+    w.write("%\nruntimeclass %%\n{%\n};\n",
         bind_each<write_custom_attribute>(attributes),
         bind<write_type_name>(type.TypeName()),
-        bind<write_required>(":", type));
+        bind<write_required>(":", type),
+        bind<write_class_members>(type));
 }
 
 auto get_out(reader const& args)
