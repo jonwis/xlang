@@ -899,7 +899,7 @@ int main(int const argc, char** argv)
             return 0;
         }
 
-        cache c{ args.values("input") };
+        cache c{ args.files("input") };
         auto const out = get_out(args);
         bool const verbose = args.exists("verbose");
 
