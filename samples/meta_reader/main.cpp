@@ -81,7 +81,7 @@ struct writer : indented_writer_base<writer>
 
     void write_value(bool value)
     {
-        write(value ? "TRUE"sv : "FALSE"sv);
+        write(value ? "true"sv : "false"sv);
     }
 
     void write_value(char16_t value)
@@ -481,12 +481,56 @@ struct writer : indented_writer_base<writer>
 
         if (name.first == "Windows.Foundation.Metadata"sv && name.second == "GuidAttribute"sv)
         {
-            write_uuid(sig);
-            return;
+            return write_uuid(sig);
         }
         else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "ContractVersionAttribute"sv)
         {
-            write_contract(sig);
+            return write_contract(sig);
+        }
+        else if (name.first == "System"sv && name.second == "FlagsAttribute")
+        {
+            return write("[flags]");
+        }
+        else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "WebHostHiddenAttribute")
+        {
+            return write("[webhosthidden]");
+        }
+        else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "ExclusiveToAttribute")
+        {
+            return; // Handled elsewhere
+        }
+        else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "ThreadingAttribute")
+        {
+            std::array models = {
+                "InvalidThreading"sv
+                "STA"sv,
+                "MTA"sv,
+                "Both"sv,
+            };
+
+            auto const& args = sig.FixedArgs();
+            auto model = std::get<uint32_t>(std::get<ElemSig>(args[0].value).value);
+            if (model < std::size(models))
+            {
+                write("[threading(%)]", models[model]);
+            }
+            return;
+        }
+        else if (name.first == "Windows.Foundation.Metadata"sv && name.second == "MarshalingBehaviorAttribute")
+        {
+            std::array behaviors = {
+                "InvalidMarshaling"sv,
+                "None"sv,
+                "Agile"sv,
+                "Standard"sv
+            };
+
+            auto const& args = sig.FixedArgs();
+            auto behavior = std::get<uint32_t>(std::get<ElemSig>(args[0].value).value);
+            if (behavior < std::size(behaviors))
+            {
+                write("[marshalingbehavior(%)]", behaviors[behavior]);
+            }
             return;
         }
 
@@ -889,7 +933,6 @@ void write_class(writer& w, TypeDef const& type)
     auto guard = w.push_generic_params(type.GenericParam());
     writer::indent_guard _{ w };
 
-    // Skip some defaults - ThreadingAttribute(Both), MarshalingBehaviorAttribute(Agile)
     auto attributes = filter_range(type.CustomAttribute(), [](auto const& attr)
     {
         if (has_attr_enum_valued(attr, "Windows.Foundation.Metadata.ThreadingAttribute"sv, "Windows.Foundation.Metadata.ThreadingModel.Both"sv))
@@ -897,6 +940,14 @@ void write_class(writer& w, TypeDef const& type)
             return false;
         }
         else if (has_attr_enum_valued(attr, "Windows.Foundation.Metadata.MarshalingBehaviorAttribute"sv, "Windows.Foundation.Metadata.MarshalingType.Agile"sv))
+        {
+            return false;
+        }
+        else if (attr.TypeNamespaceAndName() == std::make_pair("Windows.Foundation.Metadata"sv, "MuseAttribute"sv))
+        {
+            return false;
+        }
+        else if (attr.TypeNamespaceAndName() == std::make_pair("Windows.Foundation.Metadata"sv, "DualApiPartitionAttribute"sv))
         {
             return false;
         }
